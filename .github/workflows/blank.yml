@@ -1,0 +1,128 @@
+-- =================================================================
+-- SKRIP DATABASE SUPABASE: APLIKASI NGAJI YUK (PostgreSQL DDL)
+-- =================================================================
+-- Petunjuk Eksekusi:
+-- 1. Buka Dashboard Supabase (https://supabase.com/dashboard)
+-- 2. Pilih project Anda -> Masuk ke menu SQL Editor
+-- 3. Klik "New Query", tempelkan seluruh isi file ini, lalu klik "Run"
+-- =================================================================
+
+-- 1. TABEL PROFIL PENGGUNA (Terkoneksi dengan Supabase Auth)
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    full_name TEXT DEFAULT 'Sahabat Ngaji',
+    avatar_url TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Trigger untuk membuat profil otomatis ketika user mendaftar via Supabase Auth
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER 
+LANGUAGE plpgsql 
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+    INSERT INTO public.profiles (id, full_name)
+    VALUES (new.id, COALESCE(new.raw_user_meta_data->>'full_name', 'Sahabat Ngaji'))
+    ON CONFLICT (id) DO NOTHING;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- 2. TABEL PROGRES TERAKHIR BACA (Bookmark & Riwayat Baca)
+CREATE TABLE IF NOT EXISTS public.reading_progress (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    category TEXT CHECK (category IN ('iqro', 'quran')) NOT NULL,
+    identifier INT NOT NULL,     -- Nomor Iqro (1-6) atau Nomor Surah (1-114)
+    page_or_ayah INT NOT NULL,   -- Nomor Halaman (Iqro) atau Nomor Ayat (Quran)
+    title_display TEXT NOT NULL, -- Contoh: "Surah Al-Kahf" atau "Iqro 3"
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    UNIQUE(user_id, category)
+);
+
+-- 3. TABEL EVALUASI LATIHAN & BINTANG (Rating Bintang 1-5 & Catatan Tajwid)
+CREATE TABLE IF NOT EXISTS public.tajwid_evaluations (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+    target_type TEXT CHECK (target_type IN ('iqro', 'ayah', 'hukum_tajwid')) NOT NULL,
+    target_name TEXT NOT NULL,       -- Contoh: "Iqro 1 Halaman 5" atau "Al-Baqarah: Ayat 255"
+    hukum_tajwid TEXT,               -- Contoh: "Ikhfa Haqiqi", "Qalqalah", "Mad Thabi'i"
+    stars INT CHECK (stars BETWEEN 1 AND 5) NOT NULL,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 4. TABEL KUMPULAN DOA
+CREATE TABLE IF NOT EXISTS public.prayers (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    category TEXT NOT NULL,          -- Contoh: 'sebelum_mengaji', 'sehari_hari', 'sholat'
+    arabic TEXT NOT NULL,
+    latin TEXT NOT NULL,
+    translation TEXT NOT NULL,
+    source TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- 5. TABEL SHOLAWAT & LIRIK
+CREATE TABLE IF NOT EXISTS public.sholawat (
+    id SERIAL PRIMARY KEY,
+    title TEXT NOT NULL,
+    artist TEXT DEFAULT 'Umum',
+    arabic_lyrics TEXT NOT NULL,
+    latin_lyrics TEXT NOT NULL,
+    translation TEXT NOT NULL,
+    audio_url TEXT NOT NULL,         -- URL file audio streaming publik
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- =================================================================
+-- ROW LEVEL SECURITY (RLS) & ACCESS POLICIES
+-- =================================================================
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reading_progress ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tajwid_evaluations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.prayers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sholawat ENABLE ROW LEVEL SECURITY;
+
+-- Kebijakan Tabel Profil: Pengguna dapat membaca, memasukkan, dan memperbarui profilnya sendiri
+DROP POLICY IF EXISTS "Allow individual read" ON public.profiles;
+CREATE POLICY "Allow individual read" ON public.profiles 
+    FOR SELECT USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "Allow individual insert" ON public.profiles;
+CREATE POLICY "Allow individual insert" ON public.profiles 
+    FOR INSERT WITH CHECK (auth.uid() = id);
+
+DROP POLICY IF EXISTS "Allow individual update" ON public.profiles;
+CREATE POLICY "Allow individual update" ON public.profiles 
+    FOR UPDATE USING (auth.uid() = id);
+
+-- Kebijakan Tabel Progres Baca: Pengguna hanya dapat mengelola data progres miliknya
+DROP POLICY IF EXISTS "Manage own progress" ON public.reading_progress;
+CREATE POLICY "Manage own progress" ON public.reading_progress 
+    FOR ALL USING (auth.uid() = user_id) 
+    WITH CHECK (auth.uid() = user_id);
+
+-- Kebijakan Tabel Evaluasi Tajwid: Pengguna hanya dapat mengelola data latihan miliknya
+DROP POLICY IF EXISTS "Manage own evaluations" ON public.tajwid_evaluations;
+CREATE POLICY "Manage own evaluations" ON public.tajwid_evaluations 
+    FOR ALL USING (auth.uid() = user_id) 
+    WITH CHECK (auth.uid() = user_id);
+
+-- Kebijakan Tabel Doa: Akses baca terbuka untuk semua pengguna (Public Read)
+DROP POLICY IF EXISTS "Public read prayers" ON public.prayers;
+CREATE POLICY "Public read prayers" ON public.prayers 
+    FOR SELECT USING (true);
+
+-- Kebijakan Tabel Sholawat: Akses baca terbuka untuk semua pengguna (Public Read)
+DROP POLICY IF EXISTS "Public read sholawat" ON public.sholawat;
+CREATE POLICY "Public read sholawat" ON public.sholawat 
+    FOR SELECT USING (true);
